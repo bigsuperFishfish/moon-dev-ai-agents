@@ -18,9 +18,6 @@ SLEEP_BETWEEN_SEARCHES = 120
 MAX_SEARCH_RESULTS = 8
 MAX_CONTENT_LENGTH = 12000
 MIN_CONTENT_LENGTH = 500
-LLM_TIMEOUT = 120  # 增加到120秒
-LLM_RETRIES = 3    # 重試3次
-LLM_RETRY_DELAY = 5  # 重試延遲5秒
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 DATA_DIR = PROJECT_ROOT / "src" / "data" / "web_search_local"
@@ -28,8 +25,17 @@ FINAL_STRATEGIES_DIR = DATA_DIR / "final_strategies"
 SEARCH_RESULTS_CSV = DATA_DIR / "search_results.csv"
 EXTRACTION_LOG_CSV = DATA_DIR / "extraction_log.csv"
 
+# 🔥 DEBUG: Print paths on startup
+cprint(f"\n📁 PROJECT_ROOT: {PROJECT_ROOT}", "cyan")
+cprint(f"📁 DATA_DIR: {DATA_DIR}", "cyan")
+cprint(f"📁 FINAL_STRATEGIES_DIR: {FINAL_STRATEGIES_DIR}", "cyan")
+cprint(f"✅ FINAL_STRATEGIES_DIR exists: {FINAL_STRATEGIES_DIR.exists()}", "green" if FINAL_STRATEGIES_DIR.exists() else "red")
+
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 FINAL_STRATEGIES_DIR.mkdir(parents=True, exist_ok=True)
+
+# 🔥 Verify after creation
+cprint(f"✅ FINAL_STRATEGIES_DIR now exists: {FINAL_STRATEGIES_DIR.exists()}\n", "green")
 
 def init_csv_files():
     """Initialize CSV files if they don't exist"""
@@ -92,62 +98,61 @@ def log_extraction(url, num_strategies, strategy_names, quality):
 
 def call_local_llm(messages, max_tokens=2048, temperature=0.7):
     """Call local Qwen LLM with retry logic"""
-    try:
-        cprint("\n🤖 Calling Qwen...", "cyan")
-        
-        for attempt in range(LLM_RETRIES):
-            try:
-                payload = {
-                    "model": LOCAL_LLM_MODEL,
-                    "messages": messages,
-                    "max_tokens": max_tokens,
-                    "temperature": temperature
-                }
-                
-                cprint("   (Attempt " + str(attempt + 1) + "/" + str(LLM_RETRIES) + ", timeout: " + str(LLM_TIMEOUT) + "s)", "cyan")
-                
-                response = requests.post(
-                    LOCAL_LLM_URL,
-                    json=payload,
-                    headers={"Content-Type": "application/json"},
-                    timeout=LLM_TIMEOUT
-                )
-                
-                if response.status_code != 200:
-                    cprint("❌ LLM API Error: " + str(response.status_code), "red")
-                    if attempt < LLM_RETRIES - 1:
-                        wait_time = LLM_RETRY_DELAY * (2 ** attempt)
-                        cprint("⏳ Retrying in " + str(wait_time) + "s...", "yellow")
-                        time.sleep(wait_time)
+    max_retries = 2
+    retry_wait = 30
+    
+    for attempt in range(max_retries + 1):
+        try:
+            cprint(f"\n🤖 Calling Qwen (attempt {attempt + 1}/{max_retries + 1})...", "cyan")
+            
+            payload = {
+                "model": LOCAL_LLM_MODEL,
+                "messages": messages,
+                "max_tokens": max_tokens,
+                "temperature": temperature
+            }
+            
+            response = requests.post(
+                LOCAL_LLM_URL,
+                json=payload,
+                headers={"Content-Type": "application/json"},
+                timeout=120  # 2 minutes timeout
+            )
+            
+            if response.status_code != 200:
+                cprint("❌ LLM API Error: " + str(response.status_code), "red")
+                if attempt < max_retries:
+                    wait_time = retry_wait * (attempt + 1)
+                    cprint(f"⏳ Retrying in {wait_time}s...", "yellow")
+                    time.sleep(wait_time)
                     continue
-                    
-                result = response.json()
-                content = result['choices'][0]['message']['content'].strip()
+                return None
                 
-                cprint("✅ LLM (" + str(len(content)) + " chars)", "green")
-                return content
-                
-            except requests.exceptions.Timeout:
-                cprint("⏱️  LLM Timeout (attempt " + str(attempt + 1) + "/" + str(LLM_RETRIES) + ")", "yellow")
-                if attempt < LLM_RETRIES - 1:
-                    wait_time = LLM_RETRY_DELAY * (2 ** attempt)
-                    cprint("⏳ Retrying in " + str(wait_time) + "s...", "yellow")
-                    time.sleep(wait_time)
+            result = response.json()
+            content = result['choices'][0]['message']['content'].strip()
+            
+            cprint("✅ LLM (" + str(len(content)) + " chars)", "green")
+            return content
+            
+        except requests.exceptions.Timeout:
+            cprint(f"⚠️  LLM timeout (attempt {attempt + 1}/{max_retries + 1})", "yellow")
+            if attempt < max_retries:
+                wait_time = retry_wait * (attempt + 1)
+                cprint(f"⏳ Retrying in {wait_time}s...", "yellow")
+                time.sleep(wait_time)
                 continue
-            except Exception as e:
-                cprint("❌ Error calling LLM: " + str(e), "red")
-                if attempt < LLM_RETRIES - 1:
-                    wait_time = LLM_RETRY_DELAY * (2 ** attempt)
-                    cprint("⏳ Retrying in " + str(wait_time) + "s...", "yellow")
-                    time.sleep(wait_time)
+            return None
+        
+        except Exception as e:
+            cprint("❌ Error calling LLM: " + str(e), "red")
+            if attempt < max_retries:
+                wait_time = retry_wait * (attempt + 1)
+                cprint(f"⏳ Retrying in {wait_time}s...", "yellow")
+                time.sleep(wait_time)
                 continue
-        
-        cprint("❌ LLM failed after " + str(LLM_RETRIES) + " retries", "red")
-        return None
-        
-    except Exception as e:
-        cprint("❌ Unexpected error in call_local_llm: " + str(e), "red")
-        return None
+            return None
+    
+    return None
 
 def generate_search_query():
     """Generate a specific, high-quality search query"""
@@ -299,7 +304,7 @@ def extract_strategies_from_content(content, source_url):
     response = call_local_llm(messages, max_tokens=3000, temperature=0.3)
     
     if not response:
-        cprint("⚠️  No LLM response, skipping extraction", "yellow")
+        cprint("⚠️  No LLM response", "yellow")
         return []
     
     try:
@@ -334,6 +339,14 @@ def save_strategy(strategy, source_url, search_query):
         filename = "strategy_" + timestamp + "_" + slug + ".md"
         filepath = FINAL_STRATEGIES_DIR / filename
         
+        # 🔥 DEBUG: Print path info
+        cprint(f"\n🔍 Saving strategy to:", "cyan")
+        cprint(f"   Directory: {FINAL_STRATEGIES_DIR}", "cyan")
+        cprint(f"   File: {filename}", "cyan")
+        cprint(f"   Full path: {filepath}", "cyan")
+        cprint(f"   Directory exists: {FINAL_STRATEGIES_DIR.exists()}", "green" if FINAL_STRATEGIES_DIR.exists() else "red")
+        cprint(f"   Is directory: {FINAL_STRATEGIES_DIR.is_dir()}", "green" if FINAL_STRATEGIES_DIR.is_dir() else "red")
+        
         # Build content with safe string conversion for all fields
         content = "# " + name + "\n\n"
         content += "## Entry Rules\n\n"
@@ -358,11 +371,18 @@ def save_strategy(strategy, source_url, search_query):
         with open(filepath, 'w', encoding='utf-8') as f:
             f.write(content)
         
-        cprint("💾 Saved: " + filename, "green")
-        return filename
+        # 🔥 Verify file was written
+        if filepath.exists():
+            cprint(f"✅ SAVED: {filename} ({len(content)} bytes)", "green")
+            return filename
+        else:
+            cprint(f"❌ SAVE FAILED: File not found after write: {filepath}", "red")
+            return None
         
     except Exception as e:
-        cprint("❌ Error saving strategy: " + str(e), "red")
+        cprint(f"❌ Error saving strategy: {str(e)}", "red")
+        import traceback
+        cprint(traceback.format_exc(), "red")
         return None
 
 def run_search_cycle():
@@ -425,10 +445,14 @@ def run_search_cycle():
             quality
         )
         
+        # 🔥 DEBUG: Print extraction results
+        cprint(f"\n📊 Extraction results: {len(strategies)} strategies found", "cyan")
+        
         # Save each strategy
         for strategy in strategies:
-            save_strategy(strategy, result['url'], query)
-            total_strategies += 1
+            result = save_strategy(strategy, result['url'], query)
+            if result:
+                total_strategies += 1
         
         time.sleep(2)
     
@@ -437,7 +461,8 @@ def run_search_cycle():
     cprint("="*70, "green")
     cprint("\n✅ New URLs processed: " + str(total_new_urls), "yellow")
     cprint("✅ Strategies extracted: " + str(total_strategies), "yellow")
-    cprint("✅ Files saved to: " + str(FINAL_STRATEGIES_DIR), "yellow")
+    cprint(f"✅ Files saved to: {FINAL_STRATEGIES_DIR}", "yellow")
+    cprint(f"✅ Directory contents: {list(FINAL_STRATEGIES_DIR.glob('*.md'))}", "yellow")
     
     return True
 
@@ -446,7 +471,6 @@ def main():
     cprint("\n🌙 MOON DEV IMPROVED LOCAL WEB SEARCH AGENT 🌙", "white", "on_magenta")
     cprint("🤖 Model: " + LOCAL_LLM_MODEL, "cyan")
     cprint("🔄 LLM URL: " + LOCAL_LLM_URL, "cyan")
-    cprint("⏱️  LLM Timeout: " + str(LLM_TIMEOUT) + "s with " + str(LLM_RETRIES) + " retries", "yellow")
     cprint("🔄 Search interval: " + str(SLEEP_BETWEEN_SEARCHES) + "s", "yellow")
     cprint("📁 Strategies folder: " + str(FINAL_STRATEGIES_DIR), "cyan")
     cprint("📊 CSV logs: " + str(DATA_DIR), "cyan\n")
