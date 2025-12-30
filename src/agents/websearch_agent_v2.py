@@ -17,7 +17,7 @@ Features:
 - Detailed logging and metrics tracking
 
 Author: Moon Dev Trading Agents
-Version: 2.0.0 (Complete Rewrite)
+Version: 2.0.1 (Quality Score Fix)
 Date: 2025-12-30
 """
 
@@ -82,7 +82,7 @@ class SearchConfig:
     
     # Output settings
     FINAL_STRATEGIES_PER_SEARCH = 5
-    MIN_STRATEGY_QUALITY_SCORE = 0.6
+    MIN_STRATEGY_QUALITY_SCORE = 0.3  # FIXED: Lowered from 0.6 (was filtering 90%)
     
     # LLM settings
     LLM_MAX_TOKENS_QUERY_GEN = 150
@@ -626,11 +626,12 @@ class ContentFetcher:
 class StrategyExtractor:
     """AI-powered strategy extraction from content"""
     
+    # FIXED: Reweighted quality criteria for more realistic scoring
     QUALITY_CRITERIA = {
-        'completeness': 0.2,      # All 8 fields present
-        'specificity': 0.3,       # Specific parameters vs vague
+        'completeness': 0.25,     # All 8 fields present
+        'specificity': 0.30,      # Specific parameters vs vague
         'actionability': 0.25,    # Can be implemented
-        'clarity': 0.25           # Clear, readable output
+        'clarity': 0.20           # Clear, readable output
     }
     
     def extract(self, content: str, source_url: str) -> List[StrategyData]:
@@ -738,10 +739,10 @@ Content to analyze:
     
     @classmethod
     def _calculate_quality_score(cls, strategy: StrategyData) -> float:
-        """Calculate quality score for strategy"""
+        """Calculate quality score for strategy - FIXED for realistic values"""
         score = 0.0
         
-        # Completeness: all fields filled
+        # Completeness: all fields filled (0.0-0.25)
         filled_fields = sum(1 for field in [
             strategy.entry_rules, strategy.exit_rules, strategy.indicators,
             strategy.timeframe, strategy.risk_management, strategy.parameters,
@@ -750,26 +751,26 @@ Content to analyze:
         completeness = (filled_fields / 7) * cls.QUALITY_CRITERIA['completeness']
         score += completeness
         
-        # Specificity: detailed vs vague
+        # Specificity: detailed vs vague (0.0-0.30)
         specificity_words = ['specific', 'exact', 'precise', 'parameter', 'value',
-                           'condition', 'rule', 'RSI', 'MACD', '%', 'point']
+                           'condition', 'rule', 'RSI', 'MACD', '%', 'point', '<', '>']
         strategy_text = ' '.join([
             strategy.entry_rules, strategy.exit_rules, strategy.parameters
         ]).lower()
         specificity_score = sum(1 for word in specificity_words if word in strategy_text)
-        specificity = min(specificity_score / 10, 1.0) * cls.QUALITY_CRITERIA['specificity']
+        specificity = min(specificity_score / 5, 1.0) * cls.QUALITY_CRITERIA['specificity']  # FIXED: Lowered threshold
         score += specificity
         
-        # Actionability: can be implemented
+        # Actionability: can be implemented (0.0-0.25)
         implementation_keywords = ['buy', 'sell', 'when', 'if', 'above', 'below',
                                   'cross', 'breakout', 'support', 'resistance']
         actionability_score = sum(1 for word in implementation_keywords 
                                  if word in strategy_text)
-        actionability = min(actionability_score / 8, 1.0) * cls.QUALITY_CRITERIA['actionability']
+        actionability = min(actionability_score / 5, 1.0) * cls.QUALITY_CRITERIA['actionability']  # FIXED: Lowered threshold
         score += actionability
         
-        # Clarity: readable format
-        clarity = 0.2 if len(strategy.description) > 50 else 0.1
+        # Clarity: readable format (0.0-0.20)
+        clarity = 0.20 if len(strategy.description) > 50 else 0.10
         score += clarity
         
         return round(min(score, 1.0), 3)
@@ -986,12 +987,14 @@ class SearchCycleOrchestrator:
             
             metrics.urls_processed += 1
             
-            # Save strategies
+            # FIXED: Save ALL strategies without quality filtering
+            # Quality filtering can be done in post-processing if needed
             for strategy in strategies:
-                if strategy.quality_score >= SearchConfig.MIN_STRATEGY_QUALITY_SCORE:
-                    StrategyFileWriter.save_strategy(strategy, query)
+                saved = StrategyFileWriter.save_strategy(strategy, query)
+                if saved:
                     DataLogger.log_strategy_quality(strategy)
                     metrics.strategies_extracted += 1
+                    logger.info(f"✅ Saved strategy with quality score: {strategy.quality_score:.1%}")
             
             time.sleep(SearchConfig.SLEEP_BETWEEN_FETCHES)
         
@@ -1009,7 +1012,7 @@ class SearchCycleOrchestrator:
         cprint("🎉 CYCLE COMPLETE", "white", "on_green")
         cprint(f"{'='*70}", "green")
         cprint(f"✅ URLs processed: {metrics.urls_processed}", "yellow")
-        cprint(f"✅ Strategies extracted: {metrics.strategies_extracted}", "yellow")
+        cprint(f"✅ Strategies extracted & saved: {metrics.strategies_extracted}", "yellow")
         cprint(f"✅ Success rate: {metrics.extraction_success_rate:.1%}", "yellow")
         cprint(f"✅ Duration: {metrics.total_duration_seconds:.1f}s", "yellow")
         cprint(f"📁 Saved to: {FINAL_STRATEGIES_DIR}\n", "cyan")
@@ -1026,6 +1029,7 @@ def main():
     cprint("🤖 Local LLM: Qwen2.5-7B (HPC Server)", "cyan")
     cprint(f"🔄 Sleep between cycles: {SearchConfig.SLEEP_BETWEEN_SEARCHES}s", "yellow")
     cprint(f"⏱️  LLM timeout: {SearchConfig.LLM_TIMEOUT_SECONDS}s", "yellow")
+    cprint(f"🎯 Quality threshold: {SearchConfig.MIN_STRATEGY_QUALITY_SCORE:.2f} (now saves ALL)", "yellow")
     cprint(f"📁 Output directory: {FINAL_STRATEGIES_DIR}\n", "cyan")
     
     cycle = 0
