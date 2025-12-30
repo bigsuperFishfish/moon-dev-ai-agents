@@ -66,6 +66,11 @@ class SearchConfig:
     MIN_CONTENT_LENGTH = 300
     TIMEOUT_SECONDS = 20
     
+    # LLM settings
+    LLM_TIMEOUT_SECONDS = 120  # 2 minutes for LLM processing
+    LLM_MAX_RETRIES = 2
+    LLM_RETRY_WAIT = 30  # seconds
+    
     # Sleep intervals (seconds)
     SLEEP_BETWEEN_SEARCHES = 120
     SLEEP_BETWEEN_FETCHES = 2
@@ -366,47 +371,75 @@ class LLMProvider:
                          temperature: float = 0.3,
                          max_tokens: int = 2048) -> Optional[str]:
         """Generate response using local Qwen via LM Studio"""
-        try:
-            logger.debug(f"🤖 Calling Qwen (temp={temperature}, tokens={max_tokens})")
-            
-            LOCAL_LLM_URL = "http://127.0.0.1:8000/v1/chat/completions"
-            LOCAL_LLM_MODEL = "Qwen/Qwen2.5-7B-Instruct"
-            
-            payload = {
-                "model": LOCAL_LLM_MODEL,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_content}
-                ],
-                "max_tokens": max_tokens,
-                "temperature": temperature
-            }
-            
-            response = requests.post(
-                LOCAL_LLM_URL,
-                json=payload,
-                headers={"Content-Type": "application/json"},
-                timeout=SearchConfig.TIMEOUT_SECONDS
-            )
-            
-            if response.status_code != 200:
-                logger.error(f"❌ LLM API error {response.status_code}")
+        
+        # HPC LLM configuration
+        LOCAL_LLM_URL = "http://192.168.30.158:8000/v1/chat/completions"
+        LOCAL_LLM_MODEL = "Qwen/Qwen2.5-7B-Instruct"
+        
+        for attempt in range(SearchConfig.LLM_MAX_RETRIES + 1):
+            try:
+                logger.debug(f"🤖 LLM attempt {attempt + 1}/{SearchConfig.LLM_MAX_RETRIES + 1} (temp={temperature}, tokens={max_tokens})")
+                
+                payload = {
+                    "model": LOCAL_LLM_MODEL,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_content}
+                    ],
+                    "max_tokens": max_tokens,
+                    "temperature": temperature
+                }
+                
+                response = requests.post(
+                    LOCAL_LLM_URL,
+                    json=payload,
+                    headers={"Content-Type": "application/json"},
+                    timeout=SearchConfig.LLM_TIMEOUT_SECONDS
+                )
+                
+                if response.status_code != 200:
+                    logger.warning(f"⚠️  LLM API error {response.status_code}")
+                    if attempt < SearchConfig.LLM_MAX_RETRIES:
+                        wait_time = SearchConfig.LLM_RETRY_WAIT * (attempt + 1)
+                        logger.info(f"⏳ Retrying in {wait_time}s...")
+                        time.sleep(wait_time)
+                        continue
+                    return None
+                
+                result = response.json()
+                content = result['choices'][0]['message']['content'].strip()
+                logger.debug(f"✅ LLM response ({len(content)} chars)")
+                return content
+                
+            except requests.exceptions.Timeout:
+                logger.warning(f"⚠️  LLM timeout (attempt {attempt + 1}/{SearchConfig.LLM_MAX_RETRIES + 1})")
+                if attempt < SearchConfig.LLM_MAX_RETRIES:
+                    wait_time = SearchConfig.LLM_RETRY_WAIT * (attempt + 1)
+                    logger.info(f"⏳ Retrying in {wait_time}s...")
+                    time.sleep(wait_time)
+                    continue
                 return None
             
-            result = response.json()
-            content = result['choices'][0]['message']['content'].strip()
-            logger.debug(f"✅ LLM response ({len(content)} chars)")
-            return content
+            except requests.exceptions.ConnectionError:
+                logger.error(f"❌ Cannot connect to LLM server at {LOCAL_LLM_URL}")
+                if attempt < SearchConfig.LLM_MAX_RETRIES:
+                    wait_time = SearchConfig.LLM_RETRY_WAIT * (attempt + 1)
+                    logger.info(f"⏳ Retrying in {wait_time}s...")
+                    time.sleep(wait_time)
+                    continue
+                return None
             
-        except requests.exceptions.Timeout:
-            logger.error("❌ LLM request timeout")
-            return None
-        except requests.exceptions.ConnectionError:
-            logger.error("❌ Cannot connect to LLM server (ensure LM Studio running on :8000)")
-            return None
-        except Exception as e:
-            logger.error(f"❌ LLM error: {e}")
-            return None
+            except Exception as e:
+                logger.error(f"❌ LLM error: {e}")
+                if attempt < SearchConfig.LLM_MAX_RETRIES:
+                    wait_time = SearchConfig.LLM_RETRY_WAIT * (attempt + 1)
+                    logger.info(f"⏳ Retrying in {wait_time}s...")
+                    time.sleep(wait_time)
+                    continue
+                return None
+        
+        logger.error(f"❌ LLM failed after {SearchConfig.LLM_MAX_RETRIES + 1} attempts")
+        return None
 
 llm_provider = LLMProvider('anthropic')
 
@@ -990,8 +1023,9 @@ class SearchCycleOrchestrator:
 def main():
     """Main entry point"""
     cprint("\n🌙 MOON DEV WEB SEARCH AGENT V2 (PRODUCTION-GRADE)", "white", "on_magenta")
-    cprint("🤖 Local LLM: Qwen2.5-7B (via LM Studio)", "cyan")
+    cprint("🤖 Local LLM: Qwen2.5-7B (HPC Server)", "cyan")
     cprint(f"🔄 Sleep between cycles: {SearchConfig.SLEEP_BETWEEN_SEARCHES}s", "yellow")
+    cprint(f"⏱️  LLM timeout: {SearchConfig.LLM_TIMEOUT_SECONDS}s", "yellow")
     cprint(f"📁 Output directory: {FINAL_STRATEGIES_DIR}\n", "cyan")
     
     cycle = 0
