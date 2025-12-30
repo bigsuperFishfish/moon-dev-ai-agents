@@ -12,7 +12,6 @@ from dotenv import load_dotenv
 from pathlib import Path
 from .base_model import BaseModel
 from .claude_model import ClaudeModel
-from .groq_model import GroqModel
 from .openai_model import OpenAIModel
 from .gemini_model import GeminiModel  # Re-enabled with Gemini 2.5 models
 from .deepseek_model import DeepSeekModel
@@ -21,13 +20,21 @@ from .xai_model import XAIModel
 from .openrouter_model import OpenRouterModel  # 🌙 Moon Dev: OpenRouter - access to 200+ models!
 import random
 
+# 🌙 Moon Dev: Lazy load GroqModel with error handling
+try:
+    from .groq_model import GroqModel
+    GROQ_AVAILABLE = True
+except ImportError as e:
+    cprint(f"⚠️  GroqModel import failed: {str(e)}. Groq models will not be available.", "yellow")
+    GROQ_AVAILABLE = False
+    GroqModel = None
+
 class ModelFactory:
     """Factory for creating and managing AI models"""
     
     # Map model types to their implementations
     MODEL_IMPLEMENTATIONS = {
         "claude": ClaudeModel,
-        "groq": GroqModel,
         "openai": OpenAIModel,
         "gemini": GeminiModel,  # Re-enabled with Gemini 2.5 models
         "deepseek": DeepSeekModel,
@@ -36,10 +43,13 @@ class ModelFactory:
         "openrouter": OpenRouterModel  # 🌙 Moon Dev: OpenRouter - 200+ models!
     }
     
+    # Only add Groq if it's available
+    if GROQ_AVAILABLE:
+        MODEL_IMPLEMENTATIONS["groq"] = GroqModel
+    
     # Default models for each type
     DEFAULT_MODELS = {
         "claude": "claude-3-5-haiku-latest",  # Latest fast Claude model
-        "groq": "mixtral-8x7b-32768",        # Fast Mixtral model
         "openai": "gpt-4o",                  # Latest GPT-4 Optimized
         "gemini": "gemini-2.5-flash",        # Fast Gemini 2.5 model
         "deepseek": "deepseek-reasoner",     # Enhanced reasoning model
@@ -47,6 +57,10 @@ class ModelFactory:
         "xai": "grok-4-fast-reasoning",      # xAI's Grok 4 Fast with reasoning (best value: 2M context, cheap!)
         "openrouter": "google/gemini-2.5-flash"  # 🌙 Moon Dev: OpenRouter default - fast & cheap Gemini!
     }
+    
+    # Add Groq default model if available
+    if GROQ_AVAILABLE:
+        DEFAULT_MODELS["groq"] = "mixtral-8x7b-32768"  # Fast Mixtral model
     
     def __init__(self):
         # Load environment variables
@@ -65,13 +79,17 @@ class ModelFactory:
                 try:
                     if model_type in self.MODEL_IMPLEMENTATIONS:
                         model_class = self.MODEL_IMPLEMENTATIONS[model_type]
+                        if model_class is None:  # Skip if model class is None (unavailable)
+                            continue
+                        
                         model_instance = model_class(api_key)
 
                         if model_instance.is_available():
                             self._models[model_type] = model_instance
                             # Just show the ready message
                             cprint(f"✅ {model_instance.model_name} ready", "green")
-                except:
+                except Exception as e:
+                    cprint(f"⚠️  Failed to initialize {model_type}: {str(e)}", "yellow")
                     pass  # Silently skip failed models
 
         # Initialize Ollama separately (no API key needed)
@@ -82,7 +100,8 @@ class ModelFactory:
             if model_instance.is_available():
                 self._models["ollama"] = model_instance
                 cprint(f"✅ {model_instance.model_name} ready", "green")
-        except:
+        except Exception as e:
+            cprint(f"⚠️  Failed to initialize Ollama: {str(e)}", "yellow")
             pass  # Silently skip if Ollama not available
 
         if not self._models:
@@ -107,16 +126,16 @@ class ModelFactory:
                         return None
 
                 self._models[model_type] = model
-            except:
+            except Exception as e:
+                cprint(f"⚠️  Failed to get model {model_type}/{model_name}: {str(e)}", "yellow")
                 return None
 
         return model
     
     def _get_api_key_mapping(self) -> Dict[str, str]:
         """Get mapping of model types to their API key environment variable names"""
-        return {
+        mapping = {
             "claude": "ANTHROPIC_KEY",
-            "groq": "GROQ_API_KEY",
             "openai": "OPENAI_KEY",
             "gemini": "GEMINI_KEY",  # Re-enabled with Gemini 2.5 models
             "deepseek": "DEEPSEEK_KEY",
@@ -124,6 +143,12 @@ class ModelFactory:
             "openrouter": "OPENROUTER_API_KEY",  # 🌙 Moon Dev: OpenRouter - 200+ models!
             # Ollama doesn't need an API key as it runs locally
         }
+        
+        # Only add Groq if it's available
+        if GROQ_AVAILABLE:
+            mapping["groq"] = "GROQ_API_KEY"
+        
+        return mapping
     
     @property
     def available_models(self) -> Dict[str, list]:
@@ -162,4 +187,4 @@ class ModelFactory:
             return None
 
 # Create a singleton instance
-model_factory = ModelFactory() 
+model_factory = ModelFactory()
