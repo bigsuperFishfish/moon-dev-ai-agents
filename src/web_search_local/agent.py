@@ -18,6 +18,9 @@ SLEEP_BETWEEN_SEARCHES = 120
 MAX_SEARCH_RESULTS = 8
 MAX_CONTENT_LENGTH = 12000
 MIN_CONTENT_LENGTH = 500
+LLM_TIMEOUT = 120  # 增加到120秒
+LLM_RETRIES = 3    # 重試3次
+LLM_RETRY_DELAY = 5  # 重試延遲5秒
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 DATA_DIR = PROJECT_ROOT / "src" / "data" / "web_search_local"
@@ -88,36 +91,62 @@ def log_extraction(url, num_strategies, strategy_names, quality):
         cprint("❌ Error logging extraction: " + str(e), "red")
 
 def call_local_llm(messages, max_tokens=2048, temperature=0.7):
-    """Call local Qwen LLM"""
+    """Call local Qwen LLM with retry logic"""
     try:
         cprint("\n🤖 Calling Qwen...", "cyan")
         
-        payload = {
-            "model": LOCAL_LLM_MODEL,
-            "messages": messages,
-            "max_tokens": max_tokens,
-            "temperature": temperature
-        }
+        for attempt in range(LLM_RETRIES):
+            try:
+                payload = {
+                    "model": LOCAL_LLM_MODEL,
+                    "messages": messages,
+                    "max_tokens": max_tokens,
+                    "temperature": temperature
+                }
+                
+                cprint("   (Attempt " + str(attempt + 1) + "/" + str(LLM_RETRIES) + ", timeout: " + str(LLM_TIMEOUT) + "s)", "cyan")
+                
+                response = requests.post(
+                    LOCAL_LLM_URL,
+                    json=payload,
+                    headers={"Content-Type": "application/json"},
+                    timeout=LLM_TIMEOUT
+                )
+                
+                if response.status_code != 200:
+                    cprint("❌ LLM API Error: " + str(response.status_code), "red")
+                    if attempt < LLM_RETRIES - 1:
+                        wait_time = LLM_RETRY_DELAY * (2 ** attempt)
+                        cprint("⏳ Retrying in " + str(wait_time) + "s...", "yellow")
+                        time.sleep(wait_time)
+                    continue
+                    
+                result = response.json()
+                content = result['choices'][0]['message']['content'].strip()
+                
+                cprint("✅ LLM (" + str(len(content)) + " chars)", "green")
+                return content
+                
+            except requests.exceptions.Timeout:
+                cprint("⏱️  LLM Timeout (attempt " + str(attempt + 1) + "/" + str(LLM_RETRIES) + ")", "yellow")
+                if attempt < LLM_RETRIES - 1:
+                    wait_time = LLM_RETRY_DELAY * (2 ** attempt)
+                    cprint("⏳ Retrying in " + str(wait_time) + "s...", "yellow")
+                    time.sleep(wait_time)
+                continue
+            except Exception as e:
+                cprint("❌ Error calling LLM: " + str(e), "red")
+                if attempt < LLM_RETRIES - 1:
+                    wait_time = LLM_RETRY_DELAY * (2 ** attempt)
+                    cprint("⏳ Retrying in " + str(wait_time) + "s...", "yellow")
+                    time.sleep(wait_time)
+                continue
         
-        response = requests.post(
-            LOCAL_LLM_URL,
-            json=payload,
-            headers={"Content-Type": "application/json"},
-            timeout=60
-        )
-        
-        if response.status_code != 200:
-            cprint("❌ LLM API Error: " + str(response.status_code), "red")
-            return None
-            
-        result = response.json()
-        content = result['choices'][0]['message']['content'].strip()
-        
-        cprint("✅ LLM (" + str(len(content)) + " chars)", "green")
-        return content
+        cprint("❌ LLM failed after " + str(LLM_RETRIES) + " retries", "red")
+        return None
         
     except Exception as e:
-        cprint("❌ Error calling LLM: " + str(e), "red")
+        cprint("❌ Unexpected error in call_local_llm: " + str(e), "red")
         return None
 
 def generate_search_query():
@@ -270,6 +299,7 @@ def extract_strategies_from_content(content, source_url):
     response = call_local_llm(messages, max_tokens=3000, temperature=0.3)
     
     if not response:
+        cprint("⚠️  No LLM response, skipping extraction", "yellow")
         return []
     
     try:
@@ -416,6 +446,7 @@ def main():
     cprint("\n🌙 MOON DEV IMPROVED LOCAL WEB SEARCH AGENT 🌙", "white", "on_magenta")
     cprint("🤖 Model: " + LOCAL_LLM_MODEL, "cyan")
     cprint("🔄 LLM URL: " + LOCAL_LLM_URL, "cyan")
+    cprint("⏱️  LLM Timeout: " + str(LLM_TIMEOUT) + "s with " + str(LLM_RETRIES) + " retries", "yellow")
     cprint("🔄 Search interval: " + str(SLEEP_BETWEEN_SEARCHES) + "s", "yellow")
     cprint("📁 Strategies folder: " + str(FINAL_STRATEGIES_DIR), "cyan")
     cprint("📊 CSV logs: " + str(DATA_DIR), "cyan\n")
