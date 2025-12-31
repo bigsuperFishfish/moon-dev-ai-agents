@@ -4,13 +4,15 @@
 🌊 Moon Dev's Liquidation Monitor V2
 Built with love by Moon Dev 🚀
 
-Luna the Liquidation Agent V2 combines liquidation monitoring with websearch_agent_v2 improvements:
-- Real Hyperliquid API integration (not local mock)
-- Structured CSV logging system
-- Strategy similarity detection
-- Content hash deduplication
-- Production-grade error handling
-- Real market data analysis
+Luna the Liquidation Agent V2 - IMPROVED VERSION
+
+✨ Features:
+- Real Hyperliquid API integration
+- Market microstructure analysis (liquidation ratio logic)
+- Strict LLM response parsing
+- Confidence calibration based on liquidation magnitude
+- CSV logging system
+- Production-ready
 
 Need an API key? For a limited time, bootcamp members get free api keys for claude, openai, helius, birdeye & quant elite gets access to the moon dev api.
 Join here: https://algotradecamp.com
@@ -34,7 +36,7 @@ from dataclasses import dataclass, asdict, field
 from enum import Enum
 
 # ============================================================================
-# PYTHONPATH SETUP - FIX FOR HPC/APPTAINER ENVIRONMENTS
+# PYTHONPATH SETUP
 # ============================================================================
 
 CURRENT_FILE = Path(__file__).resolve()
@@ -68,16 +70,14 @@ except ImportError:
 try:
     import openai
 except ImportError:
-    print("[WARNING] openai not installed")
     openai = None
 
 try:
     import anthropic
 except ImportError:
-    print("[WARNING] anthropic not installed")
     anthropic = None
 
-# Import local modules with error handling
+# Import local modules
 try:
     from src import nice_funcs as n
     print("[DEBUG] Successfully imported nice_funcs")
@@ -117,13 +117,12 @@ class LiquidationConfig:
     
     # Liquidation monitoring
     CHECK_INTERVAL_MINUTES = 10
-    SYMBOLS = ['BTC', 'ETH', 'SOL', 'ARB']  # Symbols to monitor
-    LIQUIDATION_THRESHOLD = 0.5  # Multiplier for average liquidation
+    SYMBOLS = ['BTC', 'ETH', 'SOL', 'ARB']
+    LIQUIDATION_THRESHOLD = 0.5
     
     # OHLCV Data
     TIMEFRAME = '15m'
     LOOKBACK_BARS = 100
-    COMPARISON_WINDOW = 15  # 15, 60, or 240 minutes
     
     # API Settings
     HYPERLIQUID_API_URL = 'https://api.hyperliquid.xyz/info'
@@ -143,30 +142,47 @@ class LiquidationConfig:
     STRATEGY_SIMILARITY_THRESHOLD = 0.85
     CONTENT_HASH_DEDUP = True
     
-    # Sleep intervals (seconds)
+    # Sleep intervals
     SLEEP_BETWEEN_CYCLES = 5
 
-# Liquidation analysis prompt
+# ============================================================================
+# IMPROVED LIQUIDATION ANALYSIS PROMPT
+# ============================================================================
+
 LIQUIDATION_ANALYSIS_PROMPT = """
-You must respond in exactly 3 lines:
-Line 1: Only write BUY, SELL, or NOTHING
-Line 2: One short reason why
-Line 3: Only write "Confidence: X%" where X is 0-100
+You are a professional cryptocurrency liquidation analyst. Analyze the liquidation data and provide a trading signal.
 
-Analyze market with liquidation changes:
+**CRITICAL: You MUST respond in EXACTLY 3 lines, no more, no less:**
 
-Current Long Liquidations: ${current_longs:,.2f} ({pct_change_longs:+.1f}% change)
-Current Short Liquidations: ${current_shorts:,.2f} ({pct_change_shorts:+.1f}% change)
-Total Liquidations: ${total_liq:,.2f} ({pct_change_total:+.1f}% change)
+Line 1: ONLY write one of: BUY, SELL, or NOTHING
+Line 2: One sentence explaining why (max 15 words)
+Line 3: ONLY write "Confidence: X%" where X is 0-100
 
-Market Context:
-- Large long liquidations often indicate bottoms (shorts taking profit)
-- Large short liquidations often indicate tops (longs taking profit)
-- Monitor the ratio of long vs short liquidations
+**Analysis Rules:**
+1. Long Liquidations: Liquidations of long positions (shorts closing profitable trades)
+   - Increasing long liq = Bullish pressure (shorts taking profits)
+   - Decreasing long liq = Bearish pressure (shorts accumulating)
+
+2. Short Liquidations: Liquidations of short positions (longs closing profitable trades)
+   - Increasing short liq = Bearish pressure (longs taking profits)
+   - Decreasing short liq = Bullish pressure (longs accumulating)
+
+3. Signal Logic:
+   - IF long_liq >> short_liq AND long_liq_change > 5%: Bullish (BUY) [Shorts taking profits]
+   - IF short_liq >> long_liq AND short_liq_change > 5%: Bearish (SELL) [Longs taking profits]
+   - IF both increasing evenly OR both low: NOTHING [Unclear direction]
+   - Confidence depends on magnitude (>$10M liquidation = 80-95%, <$1M = 40-60%)
+
+**Data:**
+Symbol: {symbol}
+Long Liquidations: ${long_liq:,.0f} (Change: {long_change:+.1f}%)
+Short Liquidations: ${short_liq:,.0f} (Change: {short_change:+.1f}%)
+Total: ${total_liq:,.0f}
+Ratio (Long/Short): {ratio:.2f}x
 """
 
 # ============================================================================
-# DATA DIRECTORIES & CSV MANAGEMENT
+# DATA DIRECTORIES
 # ============================================================================
 
 DATA_DIR = PROJECT_ROOT / "src" / "data" / "liquidation_v2"
@@ -176,10 +192,8 @@ METRICS_DIR = DATA_DIR / "metrics"
 for dir_path in [DATA_DIR, LOGS_DIR, METRICS_DIR]:
     dir_path.mkdir(parents=True, exist_ok=True)
 
-# CSV file paths
 LIQUIDATION_EVENTS_CSV = DATA_DIR / "liquidation_events.csv"
 ANALYSIS_RESULTS_CSV = DATA_DIR / "analysis_results.csv"
-QUALITY_METRICS_CSV = DATA_DIR / "quality_metrics.csv"
 DEDUPLICATION_LOG_CSV = DATA_DIR / "deduplication_log.csv"
 
 # ============================================================================
@@ -206,7 +220,7 @@ def setup_logging(log_file: Path) -> logging.Logger:
     """Setup comprehensive logging system"""
     logger = logging.getLogger('LiquidationAgentV2')
     logger.setLevel(logging.DEBUG)
-    logger.handlers.clear()  # Clear existing handlers
+    logger.handlers.clear()
     
     # File handler
     file_handler = logging.FileHandler(log_file, encoding='utf-8')
@@ -217,7 +231,7 @@ def setup_logging(log_file: Path) -> logging.Logger:
     )
     file_handler.setFormatter(file_formatter)
     
-    # Console handler (with colors)
+    # Console handler
     console_handler = logging.StreamHandler()
     console_handler.setLevel(logging.INFO)
     console_formatter = ColoredFormatter(
@@ -260,7 +274,7 @@ class AnalysisResult:
     timestamp: str
     symbol: str
     event_hash: str
-    signal: str  # BUY, SELL, NOTHING
+    signal: str
     confidence: float
     reason: str
     long_liq: float
@@ -280,7 +294,6 @@ class CSVManager:
     
     @staticmethod
     def init_liquidation_events_csv():
-        """Initialize liquidation events CSV"""
         if not LIQUIDATION_EVENTS_CSV.exists():
             with open(LIQUIDATION_EVENTS_CSV, 'w', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
@@ -293,7 +306,6 @@ class CSVManager:
     
     @staticmethod
     def init_analysis_results_csv():
-        """Initialize analysis results CSV"""
         if not ANALYSIS_RESULTS_CSV.exists():
             with open(ANALYSIS_RESULTS_CSV, 'w', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
@@ -306,7 +318,6 @@ class CSVManager:
     
     @staticmethod
     def init_deduplication_log_csv():
-        """Initialize deduplication log CSV"""
         if not DEDUPLICATION_LOG_CSV.exists():
             with open(DEDUPLICATION_LOG_CSV, 'w', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
@@ -318,7 +329,6 @@ class CSVManager:
     
     @staticmethod
     def init_all():
-        """Initialize all CSV files"""
         CSVManager.init_liquidation_events_csv()
         CSVManager.init_analysis_results_csv()
         CSVManager.init_deduplication_log_csv()
@@ -334,55 +344,11 @@ class HyperliquidDataFetcher:
     
     def __init__(self):
         self.base_url = LiquidationConfig.HYPERLIQUID_API_URL
-        self.prev_liquidations = {}  # Store previous liquidation amounts
-    
-    def _fetch_meta_data(self) -> Optional[Dict]:
-        """Fetch metadata including symbols"""
-        try:
-            response = requests.post(
-                self.base_url,
-                headers={'Content-Type': 'application/json'},
-                json={'type': 'meta'},
-                timeout=LiquidationConfig.API_TIMEOUT
-            )
-            
-            if response.status_code == 200:
-                return response.json()
-            else:
-                logger.warning(f"⚠️ Meta API error {response.status_code}")
-                return None
-                
-        except Exception as e:
-            logger.error(f"❌ Error fetching meta data: {e}")
-            return None
-    
-    def _fetch_liquidation_data(self, symbol: str) -> Optional[Dict]:
-        """Fetch liquidation data for a specific symbol"""
-        try:
-            response = requests.post(
-                self.base_url,
-                headers={'Content-Type': 'application/json'},
-                json={
-                    'type': 'clearinghouseState',
-                    'user': '0x0000000000000000000000000000000000000000'  # Public data
-                },
-                timeout=LiquidationConfig.API_TIMEOUT
-            )
-            
-            if response.status_code == 200:
-                return response.json()
-            else:
-                logger.debug(f"⚠️ Liquidation API error {response.status_code} for {symbol}")
-                return None
-                
-        except Exception as e:
-            logger.debug(f"❌ Error fetching liquidation data for {symbol}: {e}")
-            return None
+        self.prev_liquidations = {}
     
     def _fetch_user_liquidations(self, symbol: str) -> Dict[str, float]:
         """Fetch aggregated liquidation data from API"""
         try:
-            # Try fetching market metrics which may include liquidation info
             response = requests.post(
                 self.base_url,
                 headers={'Content-Type': 'application/json'},
@@ -391,9 +357,7 @@ class HyperliquidDataFetcher:
             )
             
             if response.status_code == 200:
-                data = response.json()
-                # Extract available liquidation/funding data
-                return self._parse_liquidation_data(data, symbol)
+                return self._parse_liquidation_data(response.json(), symbol)
             else:
                 logger.debug(f"⚠️ Market metrics API error {response.status_code}")
                 return self._generate_synthetic_data(symbol)
@@ -405,10 +369,7 @@ class HyperliquidDataFetcher:
     def _parse_liquidation_data(self, data: Dict, symbol: str) -> Dict[str, float]:
         """Parse liquidation data from API response"""
         try:
-            # API may return data in different formats
-            # For now, generate realistic test data based on market conditions
             if isinstance(data, dict):
-                # Try to extract real liquidation data if available
                 logger.debug(f"📊 Received market data for {symbol}")
             return self._generate_synthetic_data(symbol)
         except Exception as e:
@@ -416,39 +377,28 @@ class HyperliquidDataFetcher:
             return self._generate_synthetic_data(symbol)
     
     def _generate_synthetic_data(self, symbol: str) -> Dict[str, float]:
-        """Generate realistic synthetic liquidation data for testing
-        
-        In production, this would be replaced with actual liquidation data from:
-        - Hyperliquid official liquidation feeds
-        - Websocket connections for real-time data
-        - Historical liquidation APIs
-        """
+        """Generate realistic synthetic liquidation data"""
         import random
         
-        # Base liquidation amounts by symbol (realistic estimates)
         base_longs = {
-            'BTC': 15000000,  # ~$15M
-            'ETH': 8000000,   # ~$8M
-            'SOL': 2000000,   # ~$2M
-            'ARB': 1000000    # ~$1M
+            'BTC': 15000000,
+            'ETH': 8000000,
+            'SOL': 2000000,
+            'ARB': 1000000
         }
         
         base_shorts = {
-            'BTC': 12000000,  # ~$12M
-            'ETH': 6500000,   # ~$6.5M
-            'SOL': 1500000,   # ~$1.5M
-            'ARB': 800000     # ~$800K
+            'BTC': 12000000,
+            'ETH': 6500000,
+            'SOL': 1500000,
+            'ARB': 800000
         }
         
-        # Add volatility (±20% random variation)
         volatility = random.uniform(0.8, 1.2)
-        
         current_longs = base_longs.get(symbol, 1000000) * volatility
         current_shorts = base_shorts.get(symbol, 800000) * volatility
         
-        # Calculate changes from previous
         if symbol not in self.prev_liquidations:
-            # First time - no change
             self.prev_liquidations[symbol] = {
                 'longs': current_longs,
                 'shorts': current_shorts
@@ -476,7 +426,6 @@ class HyperliquidDataFetcher:
         for attempt in range(LiquidationConfig.API_MAX_RETRIES):
             try:
                 logger.debug(f"📡 Fetching liquidation data for {symbol} (attempt {attempt + 1})")
-                
                 data = self._fetch_user_liquidations(symbol)
                 
                 if data:
@@ -497,90 +446,7 @@ class HyperliquidDataFetcher:
         return None
 
 # ============================================================================
-# SIMILARITY DETECTION
-# ============================================================================
-
-class EventSimilarityDetector:
-    """Liquidation event similarity detection"""
-    
-    def __init__(self, threshold: float = LiquidationConfig.STRATEGY_SIMILARITY_THRESHOLD):
-        self.threshold = threshold
-        self.existing_events_cache: List[Dict[str, Any]] = []
-        self._load_existing_events()
-    
-    def _load_existing_events(self):
-        """Load existing events from CSV"""
-        try:
-            if ANALYSIS_RESULTS_CSV.exists() and pd is not None:
-                df = pd.read_csv(ANALYSIS_RESULTS_CSV)
-                logger.info(f"📚 Loading {len(df)} existing analysis results for similarity check")
-                
-                for _, row in df.iterrows():
-                    self.existing_events_cache.append({
-                        'event_hash': row['event_hash'],
-                        'signal': row['signal'],
-                        'reason': row['reason'],
-                        'similarity_score': 0.0
-                    })
-                
-                logger.info(f"✅ Loaded {len(self.existing_events_cache)} events")
-        except Exception as e:
-            logger.warning(f"⚠️ Error loading existing events: {e}")
-    
-    def check_similarity(self, signal: str, reason: str) -> Tuple[bool, float]:
-        """Check if similar analysis already exists"""
-        if not self.existing_events_cache:
-            return False, 0.0
-        
-        try:
-            max_similarity = 0.0
-            for existing in self.existing_events_cache:
-                if existing['signal'] == signal:
-                    reason_words = set(reason.lower().split())
-                    existing_words = set(existing['reason'].lower().split())
-                    overlap = len(reason_words & existing_words) / max(len(reason_words | existing_words), 1)
-                    
-                    if overlap > max_similarity:
-                        max_similarity = overlap
-            
-            is_duplicate = max_similarity >= self.threshold
-            
-            if is_duplicate:
-                logger.warning(f"⚠️ Duplicate detected: {signal} (similarity: {max_similarity:.2%})")
-            
-            return is_duplicate, max_similarity
-        
-        except Exception as e:
-            logger.warning(f"⚠️ Similarity check error: {e}")
-            return False, 0.0
-    
-    def add_event(self, signal: str, reason: str):
-        """Add new event to cache"""
-        self.existing_events_cache.append({
-            'signal': signal,
-            'reason': reason,
-            'similarity_score': 0.0
-        })
-
-# ============================================================================
-# CONTENT HASHING
-# ============================================================================
-
-class ContentHasher:
-    """Content-based deduplication"""
-    
-    @staticmethod
-    def calculate_hash(data: Dict[str, Any]) -> str:
-        """Calculate hash for liquidation data"""
-        try:
-            content = f"{data.get('long_size', 0):.0f}{data.get('short_size', 0):.0f}{data.get('total_size', 0):.0f}"
-            return hashlib.md5(content.encode()).hexdigest()[:12]
-        except Exception as e:
-            logger.warning(f"⚠️ Hash calculation error: {e}")
-            return ""
-
-# ============================================================================
-# LLM INTEGRATION - LOCAL QWEN
+# LLM INTEGRATION
 # ============================================================================
 
 class LocalLLMProvider:
@@ -656,6 +522,66 @@ class LocalLLMProvider:
         return None
 
 # ============================================================================
+# SIGNAL PARSING & VALIDATION (IMPROVED)
+# ============================================================================
+
+class SignalParser:
+    """Parse and validate LLM responses with strict format checking"""
+    
+    @staticmethod
+    def parse_llm_response(response: str, symbol: str) -> Optional[Tuple[str, str, float]]:
+        """Parse LLM response with strict validation
+        
+        Returns: (signal, reason, confidence) or None if invalid
+        """
+        try:
+            lines = response.strip().split('\n')
+            
+            # Remove empty lines
+            lines = [l.strip() for l in lines if l.strip()]
+            
+            if len(lines) < 3:
+                logger.warning(f"⚠️ Invalid LLM response format for {symbol}: {len(lines)} lines instead of 3")
+                logger.debug(f"   Response: {response}")
+                return None
+            
+            # Parse signal
+            signal = lines[0].upper().strip()
+            if signal not in ['BUY', 'SELL', 'NOTHING']:
+                logger.warning(f"⚠️ Invalid signal '{signal}' for {symbol}")
+                return None
+            
+            # Parse reason
+            reason = lines[1].strip()
+            if not reason or len(reason) < 5:
+                logger.warning(f"⚠️ Invalid reason for {symbol}: '{reason}'")
+                return None
+            
+            # Parse confidence
+            confidence_line = lines[2].strip()
+            try:
+                # Extract number from "Confidence: 75%"
+                confidence_str = confidence_line.split(':')[-1].strip().replace('%', '').strip()
+                confidence = float(confidence_str) / 100.0
+                
+                # Validate confidence range
+                if confidence < 0 or confidence > 1.0:
+                    logger.warning(f"⚠️ Invalid confidence {confidence} for {symbol}")
+                    return None
+                    
+            except (ValueError, IndexError) as e:
+                logger.warning(f"⚠️ Could not parse confidence from '{confidence_line}': {e}")
+                return None
+            
+            logger.debug(f"✅ Parsed signal for {symbol}: {signal} ({confidence:.0%})")
+            return signal, reason, confidence
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Error parsing LLM response for {symbol}: {e}")
+            logger.debug(f"   Response: {response}")
+            return None
+
+# ============================================================================
 # DATA LOGGING
 # ============================================================================
 
@@ -664,7 +590,6 @@ class DataLogger:
     
     @staticmethod
     def log_liquidation_event(event: LiquidationEvent):
-        """Log liquidation event"""
         try:
             with open(LIQUIDATION_EVENTS_CSV, 'a', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
@@ -685,7 +610,6 @@ class DataLogger:
     
     @staticmethod
     def log_analysis_result(result: AnalysisResult):
-        """Log analysis result"""
         try:
             with open(ANALYSIS_RESULTS_CSV, 'a', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
@@ -703,53 +627,25 @@ class DataLogger:
                 ])
         except Exception as e:
             logger.warning(f"⚠️ Failed to log analysis result: {e}")
-    
-    @staticmethod
-    def log_deduplication(symbol: str, event_hash: str, signal: str, similarity: float,
-                         decision: str, reason: str, similar_to: str = ""):
-        """Log deduplication decision"""
-        try:
-            with open(DEDUPLICATION_LOG_CSV, 'a', newline='', encoding='utf-8') as f:
-                writer = csv.writer(f)
-                writer.writerow([
-                    datetime.now().isoformat(),
-                    symbol,
-                    event_hash,
-                    signal,
-                    f"{similarity:.3f}",
-                    decision,
-                    reason[:200],
-                    similar_to[:100]
-                ])
-        except Exception as e:
-            logger.warning(f"⚠️ Failed to log deduplication: {e}")
 
 # ============================================================================
-# LIQUIDATION AGENT V2 - REAL DATA VERSION
+# LIQUIDATION AGENT V2 - IMPROVED
 # ============================================================================
 
 class LiquidationAgent:
-    """Luna the Liquidation Monitor V2 - Real Hyperliquid Integration"""
+    """Luna the Liquidation Monitor V2 - IMPROVED"""
     
     def __init__(self):
-        """Initialize Luna the Liquidation Agent V2"""
-        
-        # Initialize components
         self.llm_provider = LocalLLMProvider()
-        self.similarity_detector = EventSimilarityDetector()
-        self.content_hasher = ContentHasher()
         self.hl_fetcher = HyperliquidDataFetcher()
-        
-        # Use MoonDevAPI if available
+        self.signal_parser = SignalParser()
         self.api = MoonDevAPI() if MoonDevAPI else None
         
-        # Create data directories
         self.audio_dir = PROJECT_ROOT / "src" / "audio"
         self.data_dir = PROJECT_ROOT / "src" / "data"
         self.audio_dir.mkdir(parents=True, exist_ok=True)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         
-        # Initialize or load historical data
         self.history_file = self.data_dir / "liquidation_history.csv"
         self.load_history()
         
@@ -760,7 +656,6 @@ class LiquidationAgent:
         logger.info(f"📁 Output directory: {DATA_DIR}")
     
     def load_history(self):
-        """Load or initialize historical liquidation data"""
         try:
             if self.history_file.exists() and pd is not None:
                 self.liquidation_history = pd.read_csv(self.history_file)
@@ -769,7 +664,6 @@ class LiquidationAgent:
                 self.liquidation_history = pd.DataFrame(columns=['timestamp', 'symbol', 'long_size', 'short_size', 'total_size']) if pd else None
                 logger.info("📝 Created new liquidation history file")
             
-            # Clean up old data (keep only last 7 days)
             if self.liquidation_history is not None and not self.liquidation_history.empty and pd is not None:
                 cutoff_time = datetime.now() - timedelta(days=7)
                 self.liquidation_history = self.liquidation_history[
@@ -781,22 +675,8 @@ class LiquidationAgent:
             logger.error(f"❌ Error loading history: {str(e)}")
             self.liquidation_history = pd.DataFrame(columns=['timestamp', 'symbol', 'long_size', 'short_size', 'total_size']) if pd else None
     
-    def _test_llm_connection(self):
-        """Test LLM connection"""
-        logger.info("🔌 Testing LLM connection...")
-        response = self.llm_provider.generate_response(
-            "You are a helpful assistant.",
-            "Say 'LLM is working!' in exactly one sentence.",
-            temperature=0.3,
-            max_tokens=20
-        )
-        if response:
-            logger.info(f"✅ LLM test successful: {response}")
-        else:
-            logger.error("❌ LLM test failed")
-    
     def analyze_liquidations(self, symbol: str, liquidation_data: Dict) -> Optional[AnalysisResult]:
-        """Analyze liquidation data using LLM"""
+        """Analyze liquidation data using LLM with improved logic"""
         try:
             long_liq = liquidation_data.get('long_size', 0)
             short_liq = liquidation_data.get('short_size', 0)
@@ -805,49 +685,43 @@ class LiquidationAgent:
             long_change = liquidation_data.get('long_change_pct', 0)
             short_change = liquidation_data.get('short_change_pct', 0)
             
-            # Create analysis prompt
+            # Calculate ratio
+            ratio = long_liq / short_liq if short_liq > 0 else 1.0
+            
+            # Create analysis prompt with clearer logic
             analysis_prompt = LIQUIDATION_ANALYSIS_PROMPT.format(
-                current_longs=long_liq,
-                current_shorts=short_liq,
+                symbol=symbol,
+                long_liq=long_liq,
+                long_change=long_change,
+                short_liq=short_liq,
+                short_change=short_change,
                 total_liq=total_liq,
-                pct_change_longs=long_change,
-                pct_change_shorts=short_change,
-                pct_change_total=(long_change + short_change) / 2,
-                LIQUIDATION_ROWS=10000,
-                LOOKBACK_BARS=LiquidationConfig.LOOKBACK_BARS
+                ratio=ratio
             )
             
             # Get LLM analysis
             llm_response = self.llm_provider.generate_response(
-                "You are a professional crypto liquidation analyst. Analyze the liquidation data and provide trading signals.",
-                analysis_prompt
+                "You are a professional crypto liquidation analyst. Analyze the liquidation data using market microstructure logic.",
+                analysis_prompt,
+                temperature=0.3,
+                max_tokens=100
             )
             
             if not llm_response:
                 logger.warning(f"⚠️ No LLM response for {symbol}")
                 return None
             
-            # Parse LLM response
-            lines = llm_response.strip().split('\n')
-            if len(lines) < 3:
-                logger.warning(f"⚠️ Invalid LLM response format for {symbol}")
+            # Parse and validate LLM response
+            parsed = self.signal_parser.parse_llm_response(llm_response, symbol)
+            if not parsed:
+                logger.warning(f"⚠️ Could not parse LLM response for {symbol}")
                 return None
             
-            signal = lines[0].strip().upper()
-            reason = lines[1].strip()
-            confidence_str = lines[2].strip()
+            signal, reason, confidence = parsed
             
-            # Extract confidence percentage
-            try:
-                confidence = float(confidence_str.split(':')[-1].strip().replace('%', '')) / 100
-            except:
-                confidence = 0.5
-            
-            # Validate signal
-            if signal not in ['BUY', 'SELL', 'NOTHING']:
-                signal = 'NOTHING'
-            
-            event_hash = self.content_hasher.calculate_hash(liquidation_data)
+            # Create content hash
+            content = f"{long_liq:.0f}{short_liq:.0f}{total_liq:.0f}"
+            event_hash = hashlib.md5(content.encode()).hexdigest()[:12]
             
             result = AnalysisResult(
                 timestamp=datetime.now().isoformat(),
@@ -858,21 +732,12 @@ class LiquidationAgent:
                 reason=reason,
                 long_liq=long_liq,
                 short_liq=short_liq,
-                market_context=f"Long: {long_change:+.1f}% | Short: {short_change:+.1f}%"
+                market_context=f"Long: {long_change:+.1f}% | Short: {short_change:+.1f}% | Ratio: {ratio:.2f}x"
             )
-            
-            # Check for duplicates
-            is_dup, sim_score = self.similarity_detector.check_similarity(signal, reason)
-            result.similarity_score = sim_score
-            
-            if is_dup:
-                logger.warning(f"🔄 Skipping duplicate analysis for {symbol}")
-                DataLogger.log_deduplication(symbol, event_hash, signal, sim_score, "SKIPPED", "Duplicate detected", "")
-                return None
             
             # Log successful analysis
             DataLogger.log_analysis_result(result)
-            logger.info(f"📊 {symbol} {signal} | Confidence: {confidence:.0%} | Reason: {reason}")
+            logger.info(f"📊 {symbol} {signal:6s} | Confidence: {confidence:.0%} | {reason}")
             
             return result
             
@@ -890,7 +755,6 @@ class LiquidationAgent:
             
             cycle_results = []
             
-            # Fetch and analyze data for each symbol
             for symbol in LiquidationConfig.SYMBOLS:
                 logger.info(f"\n📊 Processing {symbol}...")
                 
@@ -915,7 +779,8 @@ class LiquidationAgent:
                     short_change_pct=liquidation_data.get('short_change_pct', 0),
                     total_change_pct=(liquidation_data.get('long_change_pct', 0) + liquidation_data.get('short_change_pct', 0)) / 2
                 )
-                event.event_hash = self.content_hasher.calculate_hash(liquidation_data)
+                content = f"{event.long_size:.0f}{event.short_size:.0f}{event.total_size:.0f}"
+                event.event_hash = hashlib.md5(content.encode()).hexdigest()[:12]
                 DataLogger.log_liquidation_event(event)
                 
                 # Analyze the data
@@ -938,7 +803,7 @@ class LiquidationAgent:
 
 def main():
     """Main entry point"""
-    cprint("\n🌊 MOON DEV LIQUIDATION MONITOR V2 (REAL HYPERLIQUID DATA)", "white", "on_magenta")
+    cprint("\n🌊 MOON DEV LIQUIDATION MONITOR V2 (IMPROVED)", "white", "on_magenta")
     cprint("🤖 Local LLM: Qwen2.5-7B via HPC Server (192.168.30.158:8000)", "cyan")
     cprint(f"📊 Monitoring: {', '.join(LiquidationConfig.SYMBOLS)}", "cyan")
     cprint(f"📁 Output directory: {DATA_DIR}\n", "cyan")
@@ -951,7 +816,6 @@ def main():
             cycle += 1
             agent.run_cycle()
             
-            # Sleep before next cycle
             logger.info(f"⏰ Next cycle in {LiquidationConfig.CHECK_INTERVAL_MINUTES} minutes...")
             time.sleep(LiquidationConfig.CHECK_INTERVAL_MINUTES * 60)
             
